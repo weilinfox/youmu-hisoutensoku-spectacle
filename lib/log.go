@@ -197,7 +197,7 @@ func detect(buf []byte) {
 			//   0x0d ,0x09 ,0x13 ,0x78 ,0x9c ,0xbb ,0xc7 ,0xcd ,0x00 ,0x06 ,0x8c ,0x1c ,0x0c ,0x28 ,0x80 ,0x85 ,0x01 ,0x00 ,0x18 ,0x5b ,0x00 ,0xf7
 			//   [222 11 0 0 0 0 0 0 1 8 0 0 0 0 0 0 0 0 0 0 0 0 0 0 4 0]
 			//    de  b
-			//    bde>>1 5ef            |  5ef  |  5f0  |  5f1  |  5f2  |  // 不知道对不对但是不重要了
+			//    bde>>1==5ef            |  5ef  |  5f0  |  5f1  |  5f2  |  // 不知道 frame id 对不对但是不重要了 client input + host input 一组 4 bytes
 			//                                             line 4522
 			//   0d 03 ef 05 00 00 05 02 00 00 00 00
 			//   0e 03 ef 05 00 00 05 01 00 00
@@ -243,7 +243,13 @@ func detect(buf []byte) {
 			//   0x0d ,0x09 ,0x11 ,0x78 ,0x9c ,0x7b ,0xc7 ,0xcd ,0x00 ,0x06 ,0x8c ,0x1c ,0x0c ,0x68 ,0x00 ,0x00 ,0x19 ,0xf3 ,0x01 ,0x03
 			//   [238 11 0 0 0 0 0 0 1 8 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0]
 			//   0e 0b ee 0b 00 00 01
-			//   [246 11 0 0 0 0 0 0 1 8 0 0 132 0 0 0 132 0 0 0 132 0 0 0 4 0]  11,246->bf6 bf6>>1==5fb 132->0x84 （没看懂 对不上）
+			//   [246 11 0 0 0 0 0 0 1 8 0 0 132 0 0 0 132 0 0 0 132 0 0 0 4 0]  11,246->bf6 bf6>>1==5fb 132->0x84
+
+			//  replay 发送的是机体的状态而不是玩家的操作
+			//  replay 中的 frame id 是这个操作在 0e03/0d03 中 frame id << 1
+			//  >> quote touhou-protocol-docs here （说法略有不同）
+			//  >> replay_input is a pair of a client_input and a host_input, always sent in pairs and in that order.
+			//  >> There are game_inputs_count game_input, which means that there are actually replay_inputs_count = game_inputs_count / 2 pairs of host and client inputs.
 
 			/*	b := bytes.NewBuffer([]byte{0x78, 0x9c, 0xbb, 0xa1, 0xca, 0x00, 0x06, 0x6c, 0x1c, 0x1c, 0x0c, 0x5a, 0x0c, 0x1c, 0x48, 0x10, 0x00, 0x1e, 0xb7, 0x01, 0x6e})
 				r, err := zlib.NewReader(b)
