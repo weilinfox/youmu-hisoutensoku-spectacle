@@ -169,8 +169,96 @@ func detect(buf []byte) {
 			if len(buf) != 2 {
 				logger.Error("GAME_MATCH_REQUEST package length is not 2? ", len(buf))
 			}
+
+			//   127.0.0.1-34756-watch.pcapng line 9431 不知道为啥抓包 0x0e 0x0b 包出现在 0x0d 0x09 包后面
+			//   0x0e ,0x0b ,0xd0 ,0x25 ,0x00 ,0x00 ,0x06 [frame id 208 37 0 0] [match id 0x06]
+			//   0x0d ,0x09 ,0x18 ,0x78 ,0x9c ,0xbb ,0xa0 ,0xca ,0x00 ,0x06 ,0x6c ,0x5c ,0x1c ,0x0c ,0x30 ,0xa8 ,0x01 ,0xc6 ,0x0c ,0x0c ,0x9a ,0x0c ,0x00 ,0x23 ,0x97 ,0x01 ,0xaf
+			//   decompress [208 37 0 0 0 0 0 0 6 10 8 0 8 0 8 0 8 0 8 0 40 0 8 0 40 0 0 0 41 0]
+
+			//   127.0.0.1-34756-watch.pcapng line 9433
+			//   0x0e ,0x0b ,0xd8 ,0x25 ,0x00 ,0x00 ,0x06 [frame id 216 37 0 0] [match id 0x06]
+			//   0x0d ,0x09 ,0x15 ,0x78 ,0x9c ,0xbb ,0xa1 ,0xca ,0x00 ,0x06 ,0x6c ,0x1c ,0x1c ,0x0c ,0x5a ,0x0c ,0x1c ,0x48 ,0x10 ,0x00 ,0x1e ,0xb7 ,0x01 ,0x6e
+			//   decompress [216 37 0 0 0 0 0 0 6 8 8 0 42 0 8 0 8 0 8 0 8 0 8 0 8 0]
+
+			//   frame_id [216 37 0 0] end_frame_id [0 0 0 0] match_id [6] game_inputs_count [8] replay_inputs [8 0] [42 0] [8 0] [8 0] [8 0] [8 0] [8 0] [8 0]
+			//   >> quote touhou-protocol-docs here （问就是没看懂）
+			//   >> replay_inputs is a list of the last replay_inputs_count inputs of both players, stored in descending frame order.
+			//   >> The first replay_input is the input at frame frame_id, the next one is the input at frame frame_id - 1, and so on.
+
+			//   10800与52513对战，51390从1487开始观战.pcapng line 1720
+			//   0x0e ,0x0b ,0xe0 ,0x01 ,0x00 ,0x00 ,0x01   frame id [ 000001e0 ]
+			//   0x0d ,0x09 ,0x11 ,0x78 ,0x9c ,0x7b ,0xc0 ,0xc8 ,0x00 ,0x06 ,0x8c ,0x36 ,0x0c ,0x03 ,0x04 ,0x00 ,0x8f ,0x99 ,0x01 ,0x1f
+			//   [224 1 0 0 0 0 0 0 1 60 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0]
+			//   全是 0 大失败
+
+			//   10800与54015对战，39965从2171开始观战.pcapng line 4687
+			//    frame id [ 00000bde ]
+			//   0e 0b d6 0b 00 00 01       请求了 bd6 ，咕掉 789a 发送 bcde
+			//   0x0d ,0x09 ,0x13 ,0x78 ,0x9c ,0xbb ,0xc7 ,0xcd ,0x00 ,0x06 ,0x8c ,0x1c ,0x0c ,0x28 ,0x80 ,0x85 ,0x01 ,0x00 ,0x18 ,0x5b ,0x00 ,0xf7
+			//   [222 11 0 0 0 0 0 0 1 8 0 0 0 0 0 0 0 0 0 0 0 0 0 0 4 0]
+			//    de  b
+			//    bde>>1 5ef            |  5ef  |  5f0  |  5f1  |  5f2  |  // 不知道对不对但是不重要了
+			//                                             line 4522
+			//   0d 03 ef 05 00 00 05 02 00 00 00 00
+			//   0e 03 ef 05 00 00 05 01 00 00
+			//   0d 03 f0 05 00 00 05 02 00 00 00 00
+			//   0e 03 f0 05 00 00 05 01 00 00
+			//   0d 03 f1 05 00 00 05 02 04 00 00 00
+			//   0e 03 f1 05 00 00 05 01 00 00
+			//   0d 03 f2 05 00 00 05 02 04 00 00 00
+			//   0e 03 f2 05 00 00 05 01 00 00
+			//   0d 03 f3 05 00 00 05 02 04 00 00 00
+			//   0e 03 f3 05 00 00 05 01 00 00
+			//   0d 03 f4 05 00 00 05 02 04 00 00 00
+			//   ...
+			//   0e 03 fc 05 00 00 05 01 00 00
+			//   0d 03 fd 05 00 00 05 02 04 00 00 00
+			//   0e 03 fd 05 00 00 05 01 00 00
+			//   0d 03 fe 05 00 00 05 02 14 00 00 00
+			//   0e 03 fe 05 00 00 05 01 00 00
+			//   0d 03 ff 05 00 00 05 02 14 00 00 00
+			//   0e 03 ff 05 00 00 05 01 00 00
+			//   0d 03 00 06 00 00 05 02 14 00 00 00
+			//   0e 03 ff 05 00 00 05 01 00 00
+			//   0e 03 00 06 00 00 05 01 00 00
+			//   0d 03 01 06 00 00 05 02 14 00 00 00
+			//   0d 03 02 06 00 00 05 04 14 00 00 00 14 00 00 00
+			//   0e 03 02 06 00 00 05 01 00 00
+			//   0d 03 03 06 00 00 05 04 04 00 00 00 14 00 00 00
+			//   0e 03 03 06 00 00 05 01 00 00
+			//   0d 03 04 06 00 00 05 04 04 00 00 00 04 00 00 00
+			//   0e 03 04 06 00 00 05 01 00 00
+			//   0d 03 05 06 00 00 05 02 04 00 00 00
+			//   0e 03 05 06 00 00 05 01 00 00
+			//   0d 03 06 06 00 00 05 04 04 00 00 00 04 00 00 00
+			//   0e 03 06 06 00 00 05 01 00 00
+			//   0d 03 07 06 00 00 05 04 14 00 00 00 04 00 00 00
+			//   0e 03 07 06 00 00 05 01 00 00
+			//   0d 03 08 06 00 00 05 02 14 00 00 00
+			//                                             line 4698
+			//   0e 0b de 0b 00 00 01
+			//   0x0d ,0x09 ,0x11 ,0x78 ,0x9c ,0x7b ,0xc6 ,0xcd ,0x00 ,0x06 ,0x8c ,0x1c ,0x0c ,0x68 ,0x00 ,0x00 ,0x19 ,0x23 ,0x00 ,0xfb
+			//   [230 11 0 0 0 0 0 0 1 8 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0]
+			//   0e 0b e6 0b 00 00 01
+			//   0x0d ,0x09 ,0x11 ,0x78 ,0x9c ,0x7b ,0xc7 ,0xcd ,0x00 ,0x06 ,0x8c ,0x1c ,0x0c ,0x68 ,0x00 ,0x00 ,0x19 ,0xf3 ,0x01 ,0x03
+			//   [238 11 0 0 0 0 0 0 1 8 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0]
+			//   0e 0b ee 0b 00 00 01
+			//   [246 11 0 0 0 0 0 0 1 8 0 0 132 0 0 0 132 0 0 0 132 0 0 0 4 0]  11,246->bf6 bf6>>1==5fb 132->0x84 （没看懂 对不上）
+
+			/*	b := bytes.NewBuffer([]byte{0x78, 0x9c, 0xbb, 0xa1, 0xca, 0x00, 0x06, 0x6c, 0x1c, 0x1c, 0x0c, 0x5a, 0x0c, 0x1c, 0x48, 0x10, 0x00, 0x1e, 0xb7, 0x01, 0x6e})
+				r, err := zlib.NewReader(b)
+				if err != nil {
+					fmt.Println(err)
+				} else {
+					ans := make([]byte, 2048)
+					n, err := r.Read(ans)
+					r.Close()
+					fmt.Println(err == io.EOF, err, ans[:n])
+				}*/
 		case GAME_REPLAY:
+
 		case GAME_REPLAY_REQUEST:
+
 		}
 	case SOKUROLL_TIME:
 		logger.Info("SOKUROLL_TIME")
