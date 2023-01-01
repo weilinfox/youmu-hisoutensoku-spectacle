@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/sirupsen/logrus"
 )
@@ -47,6 +48,10 @@ const (
 func sockaddrIn2String(addr []byte) string {
 	return fmt.Sprintf("%d.%d.%d.%d:%d", addr[2], addr[3], addr[4], addr[5], int(addr[0])<<8+int(addr[1]))
 }
+
+var successChan = make(chan int)
+var spectacleChan = make(chan int)
+var startChan = make(chan int)
 
 func detect(buf []byte) {
 
@@ -97,6 +102,11 @@ func detect(buf []byte) {
 		if len(buf) != 81 {
 			logger.Error("INIT_SUCCESS package len is not 81?", len(buf))
 		}
+
+		if buf[5] == 0x10 {
+		} else if buf[5] == 0x11 {
+			spectacleChan <- 1
+		}
 	case INIT_ERROR:
 		logger.Info("INIT_ERROR with reason", buf[1])
 
@@ -117,7 +127,7 @@ func detect(buf []byte) {
 		if len(buf) != 1 {
 			logger.Error("QUIT package len is not 1?", len(buf))
 		}
-	case HOST_GAME | CLIENT_GAME:
+	case HOST_GAME, CLIENT_GAME:
 		if buf[0] == HOST_GAME {
 			logger.Info("HOST_GAME data")
 		} else {
@@ -138,6 +148,8 @@ func detect(buf []byte) {
 				logger.Info("Ack client character select page loaded")
 			} else if buf[2] == 0x05 {
 				logger.Info("Ack client battle loaded")
+
+				successChan <- 1
 			}
 			if len(buf) != 3 {
 				logger.Error("GAME_LOADED_ACK package length is not 3? ", len(buf))
@@ -155,9 +167,13 @@ func detect(buf []byte) {
 			//            0d 04 {00 00 00 (14 c8 00 c8 00 c8 00 c8 00 c9 00 c9 00 d0 00 d0 00 d0 00 64 00 64 00 65 00 65 00 66 00 66 00 67 00 67 00 01 00 01 00 01 00) 00}
 			//                                          {0f 00 00 (14 64 00 64 00 65 00 65 00 66 00 66 00 67 00 67 00 c8 00 c8 00 c8 00 c8 00 c9 00 c9 00 c9 00 c9 00 cb 00 cb 00 cb 00 cb 00) 00} 11         10    e3 90 c3 16   01
 			//                  {character_id skin_id deck_id (deck_size deck) disabled_simultaneous_buttons}                                                                                     stage_id music_id random_seed match_id
-			logger.Info("GAME_MATCH_ACK")
-			if len(buf) != 2 {
-				logger.Error("GAME_MATCH_ACK package length is not 59? ", len(buf))
+			logger.Info("GAME_MATCH")
+			if len(buf) == 59 {
+
+			} else if len(buf) == 99 {
+				startChan <- 1
+			} else {
+				logger.Info("GAME_MATCH package length is not 59/99? ", len(buf))
 			}
 		case GAME_MATCH_ACK:
 			logger.Info("GAME_MATCH_ACK")
@@ -191,9 +207,9 @@ func detect(buf []byte) {
 			//   [224 1 0 0 0 0 0 0 1 60 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0]
 			//   全是 0 大失败
 
-			//   10800与54015对战，39965从2171开始观战.pcapng line 4687
+			//   10800与54015对战，39965从2171开始观战.pcapng line 4687   不知道为啥抓包 0x0e 0x0b 包出现在 0x0d 0x09 包后面， wireshark 里包时间的顺序并不是实际的主机发送的顺序
 			//    frame id [ 00000bde ]
-			//   0e 0b d6 0b 00 00 01       请求了 bd6 ，咕掉 789a 发送 bcde
+			//   0e 0b d6 0b 00 00 01       这里因为包顺序不对，忽略就好了，实际对应应该是 0e 0b de 0b 00 00 01
 			//   0x0d ,0x09 ,0x13 ,0x78 ,0x9c ,0xbb ,0xc7 ,0xcd ,0x00 ,0x06 ,0x8c ,0x1c ,0x0c ,0x28 ,0x80 ,0x85 ,0x01 ,0x00 ,0x18 ,0x5b ,0x00 ,0xf7
 			//   [222 11 0 0 0 0 0 0 1 8 0 0 0 0 0 0 0 0 0 0 0 0 0 0 4 0]
 			//    de  b
@@ -284,7 +300,7 @@ func Sync(master, slave *net.UDPConn) {
 	var slaveAddr *net.UDPAddr
 	var wg sync.WaitGroup
 
-	wg.Add(2)
+	wg.Add(3)
 	go func() {
 		defer wg.Done()
 
@@ -330,6 +346,38 @@ func Sync(master, slave *net.UDPConn) {
 				logger.WithError(err).Error("master write error")
 				break
 			}
+		}
+
+	}()
+
+	go func() {
+		defer wg.Done()
+
+		logger.Warn("Wait for spectacle init")
+		<-successChan
+
+		logger.Warn("Send spectacle init")
+		slave.WriteToUDP([]byte{5, 110, 115, 101, 217, 255, 196, 110, 72, 141, 124, 161, 146, 49, 52, 114, 149, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, slaveAddr)
+
+		<-spectacleChan
+		// slave.WriteToUDP([]byte{0x04, 0x04, 0x00, 0x00, 0x00}, slaveAddr)
+		logger.Warn("Get match info")
+		slave.WriteToUDP([]byte{0x0e, 0x0b, 0xff, 0xff, 0xff, 0xff, 0x00}, slaveAddr)
+
+		<-startChan
+		logger.Warn("Get some replay package")
+		for i := 0; i < 15*5; i += 1 {
+			// 如果不存在的时刻 得到的会是空
+			// 0e 0b 34 05 00 00 01
+			// [13, 9 ,15, 120, 156, 99 ,224 ,231 ,103, 0 ,1 ,70, 6 ,0 ,1 ,11, 0, 32]  [0 15 15 0 0 0 0 0 1 0]
+			// [13, 9 ,15, 120, 156, 19, 224, 231, 103, 0 ,1 ,70, 6 ,0 ,1 ,171, 0, 48] [16 15 15 0 0 0 0 0 1 0]
+			// 注意前 1s 是没有数据的 毕竟在放第一战动画
+			// 抓包计算
+			// 对于 frame id 60f/s
+			// 对于 replay frame id 120f/s
+			// 对于 0x0e, 0x0b 15f/s
+			slave.WriteToUDP([]byte{0x0e, 0x0b, 0x00, 0x0, 0x0, 0x00, 0x01}, slaveAddr)
+			time.Sleep(time.Millisecond * 66)
 		}
 
 	}()
