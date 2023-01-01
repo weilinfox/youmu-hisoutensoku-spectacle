@@ -5,8 +5,8 @@ import (
 	"compress/zlib"
 	"fmt"
 	"io"
+	"math"
 	"net"
-	"sync"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -25,10 +25,10 @@ const (
 	INIT_SUCCESS
 	INIT_ERROR
 	REDIRECT
-	QUIT      = iota + 3
-	HOST_GAME = iota + 4
+	QUIT      type123pkg = iota + 3
+	HOST_GAME type123pkg = iota + 4
 	CLIENT_GAME
-	SOKUROLL_TIME = iota + 5
+	SOKUROLL_TIME type123pkg = iota + 5
 	SOKUROLL_TIME_ACK
 	SOKUROLL_STATE
 	SOKUROLL_SETTINGS
@@ -43,9 +43,9 @@ const (
 	GAME_INPUT
 	GAME_MATCH
 	GAME_MATCH_ACK
-	GAME_MATCH_REQUEST = iota + 3
+	GAME_MATCH_REQUEST data123pkg = iota + 3
 	GAME_REPLAY
-	GAME_REPLAY_REQUEST = iota + 4
+	GAME_REPLAY_REQUEST data123pkg = iota + 4
 )
 
 func sockaddrIn2String(addr []byte) string {
@@ -60,6 +60,7 @@ var spectacleAcceptChan = make(chan int)
 var repReqStatus byte
 
 var quitFlag = false
+var initSuccessPkg [81]byte
 var gameId [16]byte     // 16 bytes
 var hostInfo [45]byte   // 45 bytes
 var clientInfo [45]byte // 45 bytes
@@ -125,6 +126,7 @@ func detect(buf []byte) {
 
 		if buf[5] == 0x10 {
 		} else if buf[5] == 0x11 {
+			copy(initSuccessPkg[:], buf)
 			spectacleAcceptChan <- 1
 		}
 	case INIT_ERROR:
@@ -149,7 +151,7 @@ func detect(buf []byte) {
 			logger.Error("QUIT package len is not 1?", len(buf))
 		}
 	case HOST_GAME, CLIENT_GAME:
-		if buf[0] == HOST_GAME {
+		if buf[0] == byte(HOST_GAME) {
 			logger.Info("HOST_GAME data")
 		} else {
 			logger.Info("CLIENT_GAME data")
@@ -324,6 +326,7 @@ func detect(buf []byte) {
 						logger.Info("Replay data decompress ", ans[:n])
 
 						//   frame_id [216 37 0 0] end_frame_id [0 0 0 0] match_id [6] game_inputs_count [8] replay_inputs [8 0] [42 0] [8 0] [8 0] [8 0] [8 0] [8 0] [8 0]
+						//   game_inputs_count 60 MAX
 						if n >= 10 && n-10 == int(ans[9])*2 {
 							frameId := int(ans[0]) | int(ans[1])<<8 | int(ans[2])<<16 | int(ans[3])<<24
 							endFrameId := int(ans[4]) | int(ans[5])<<8 | int(ans[6])<<16 | int(ans[7])<<24
@@ -392,11 +395,13 @@ func detect(buf []byte) {
 
 func Sync(master, slave *net.UDPConn) {
 	var slaveAddr *net.UDPAddr
-	var wg sync.WaitGroup
+	ch := make(chan int, 3)
 
-	wg.Add(3)
+	// master -> slave
 	go func() {
-		defer wg.Done()
+		defer func() {
+			ch <- 1
+		}()
 
 		buf := make([]byte, 2048)
 
@@ -420,8 +425,11 @@ func Sync(master, slave *net.UDPConn) {
 
 	}()
 
+	// slave -> master
 	go func() {
-		defer wg.Done()
+		defer func() {
+			ch <- 1
+		}()
 
 		var n int
 		var err error
@@ -444,8 +452,11 @@ func Sync(master, slave *net.UDPConn) {
 
 	}()
 
+	// replay record
 	go func() {
-		defer wg.Done()
+		defer func() {
+			ch <- 1
+		}()
 
 		logger.Warn("Wait for host and client init")
 		<-gameLoadSuccessChan
@@ -484,7 +495,7 @@ func Sync(master, slave *net.UDPConn) {
 				case 0x00, 0x03:
 					getId := len(replayData[matchId]) - 1 // at start, match id == 0 , get id == -1
 					logger.Info("Send replay request ", getId, " ", matchId)
-					slave.WriteToUDP([]byte{CLIENT_GAME, GAME_REPLAY_REQUEST, byte(getId), byte(getId >> 8), byte(getId >> 16), byte(getId >> 24), matchId}, slaveAddr)
+					slave.WriteToUDP([]byte{byte(CLIENT_GAME), byte(GAME_REPLAY_REQUEST), byte(getId), byte(getId >> 8), byte(getId >> 16), byte(getId >> 24), matchId}, slaveAddr)
 					repReqStatus = 0x01
 				case 0x01, 0x02:
 					repReqStatus++
@@ -505,5 +516,126 @@ func Sync(master, slave *net.UDPConn) {
 
 	}()
 
-	wg.Wait()
+	// spectacle server
+	go func() {
+		defer func() {
+			ch <- 1
+		}()
+
+		udpAddr, err := net.ResolveUDPAddr("udp", "0.0.0.0:4647")
+		if err != nil {
+			logger.WithError(err).Error("Spectacle server udp address resolve error")
+			return
+		}
+		udpConn, err := net.ListenUDP("udp", udpAddr)
+		if err != nil {
+			logger.WithError(err).Error("Spectacle server listen error")
+		}
+		defer udpConn.Close()
+
+		buf := make([]byte, 2048)
+
+		for {
+			n, udpRAddr, err := udpConn.ReadFromUDP(buf)
+			if err != nil {
+				logger.WithError(err).Error("Spectacle server read from remote error")
+				return
+			}
+
+			switch type123pkg(buf[0]) {
+			case HELLO:
+				logger.Info("REPLAY_SERVER get hello")
+				_, _ = udpConn.WriteToUDP([]byte{byte(OLLEH)}, udpRAddr)
+
+			case CHAIN:
+				logger.Info("REPLAY_SERVER get chain")
+				_, _ = udpConn.WriteToUDP([]byte{4, 4, 0, 0, 0}, udpRAddr)
+
+			case INIT_REQUEST:
+				if n == 65 {
+					logger.Info("REPLAY_SERVER get INIT_REQUEST")
+					if (buf[25] == 0x00 && matchId == 0) || buf[25] == 0x01 {
+						// replay request but not start or match request
+						logger.Info("REPLAY_SERVER INIT_ERROR")
+						_, _ = udpConn.WriteToUDP([]byte{byte(INIT_ERROR), 1, 0, 0, 0}, udpRAddr)
+					} else if buf[25] == 0x00 && matchId > 0 {
+						// replay request and match started
+						logger.Info("REPLAY_SERVER INIT_SUCCESS")
+						_, _ = udpConn.WriteToUDP(initSuccessPkg[:], udpRAddr)
+					}
+				}
+
+			case CLIENT_GAME:
+				switch data123pkg(buf[1]) {
+				case GAME_REPLAY_REQUEST:
+					if n == 7 {
+						logger.Info("REPLAY_SERVER GAME_REPLAY_REQUEST", buf[:n])
+						frameId := int(buf[2]) | int(buf[3])<<8 | int(buf[4])<<16 | int(buf[5])<<24
+						if frameId < 0 || buf[6] < matchId {
+							data := []byte{byte(HOST_GAME), byte(GAME_MATCH)}
+							data = append(data, hostInfo[:]...)
+							data = append(data, clientInfo[:]...)
+							data = append(data, stageId)
+							data = append(data, musicId)
+							data = append(data, randomSeeds[:]...)
+							data = append(data, matchId)
+
+							logger.Info("REPLAY_SERVER GAME_MATCH")
+							_, _ = udpConn.WriteToUDP(data, udpRAddr)
+						} else if buf[6] == matchId {
+							data := []byte{byte(HOST_GAME), byte(GAME_REPLAY)}
+
+							// replay data
+							repData := replayData[matchId]
+							endFrameId := len(repData) - 1
+							sendFrameId := int(math.Min(float64(endFrameId), float64(frameId+60)))
+							var gameInput []byte
+							if frameId <= endFrameId {
+								// send 60 max
+								for i := sendFrameId; i > frameId; i-- {
+									gameInput = append(gameInput, []byte{byte(repData[i] >> 8), byte(repData[i])}...)
+								}
+							}
+							if len(gameInput)%4 != 0 {
+								logger.Error("REPLAY_SERVER game input is not time of 4 ?")
+							}
+
+							// append addition data (frameId endFrameId matchId inputCount inputs)
+							gameInput = append([]byte{matchId, byte(len(gameInput) >> 1)}, gameInput...)
+							if replayEnd[matchId] {
+								gameInput = append([]byte{byte(endFrameId), byte(endFrameId >> 8), byte(endFrameId >> 16), byte(endFrameId >> 24)}, gameInput...)
+							} else {
+								gameInput = append([]byte{0, 0, 0, 0}, gameInput...)
+							}
+							gameInput = append([]byte{byte(sendFrameId), byte(sendFrameId >> 8), byte(sendFrameId >> 16), byte(sendFrameId >> 24)}, gameInput...)
+
+							// zlib compress
+							var zlibData bytes.Buffer
+							zlibw := zlib.NewWriter(&zlibData)
+							_, err = zlibw.Write(gameInput)
+							if err != nil {
+								logger.WithError(err).Error("REPLAY_SERVER zlib compress error")
+							}
+							_ = zlibw.Close()
+
+							// make data (0x09 size data)
+							data = append(data, byte(zlibData.Len()))
+							data = append(data, zlibData.Bytes()...)
+
+							logger.Info("REPLAY_SERVER GAME_REPLAY sendFrameId ", sendFrameId, " frameId ", frameId, gameInput)
+							_, _ = udpConn.WriteToUDP(data, udpRAddr)
+						}
+					}
+				}
+
+			default:
+				logger.Warn("REPLAY_SERVER what is this ", buf[:n])
+
+			}
+		}
+	}()
+
+	<-ch
+
+	logger.Info("Server terminate")
 }
