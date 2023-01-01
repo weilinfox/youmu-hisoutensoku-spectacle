@@ -1,7 +1,10 @@
 package lib
 
 import (
+	"bytes"
+	"compress/zlib"
 	"fmt"
+	"io"
 	"net"
 	"sync"
 	"time"
@@ -49,9 +52,24 @@ func sockaddrIn2String(addr []byte) string {
 	return fmt.Sprintf("%d.%d.%d.%d:%d", addr[2], addr[3], addr[4], addr[5], int(addr[0])<<8+int(addr[1]))
 }
 
-var successChan = make(chan int)
-var spectacleChan = make(chan int)
-var startChan = make(chan int)
+var gameLoadSuccessChan = make(chan int)
+var spectacleAcceptChan = make(chan int)
+
+// var startChan = make(chan int)
+
+var repReqStatus byte
+
+var quitFlag = false
+var gameId [16]byte     // 16 bytes
+var hostInfo [45]byte   // 45 bytes
+var clientInfo [45]byte // 45 bytes
+var stageId byte
+var musicId byte
+var randomSeeds [4]byte // 4 bytes
+var matchId byte
+
+var replayData = make(map[byte][]uint16)
+var replayEnd = make(map[byte]bool)
 
 func detect(buf []byte) {
 
@@ -81,9 +99,11 @@ func detect(buf []byte) {
 		if buf[25] == 0x01 {
 			// play_request
 			logger.Info("INIT_REQUEST with game id ", buf[1:17], " | ", buf[25], " is play_request |", " profile name ", buf[27:27+buf[26]])
+			copy(gameId[:], buf[1:17])
 		} else {
 			// spectate_request
 			logger.Info("INIT_REQUEST with game id ", buf[1:17], " | ", buf[25], " is spectate_request")
+			copy(gameId[:], buf[1:17])
 		}
 		if len(buf) != 65 {
 			logger.Error("INIT_REQUEST package len is not 65?", len(buf))
@@ -105,7 +125,7 @@ func detect(buf []byte) {
 
 		if buf[5] == 0x10 {
 		} else if buf[5] == 0x11 {
-			spectacleChan <- 1
+			spectacleAcceptChan <- 1
 		}
 	case INIT_ERROR:
 		logger.Info("INIT_ERROR with reason", buf[1])
@@ -124,6 +144,7 @@ func detect(buf []byte) {
 	case QUIT:
 		// [11]
 		logger.Info("QUIT")
+		quitFlag = true
 		if len(buf) != 1 {
 			logger.Error("QUIT package len is not 1?", len(buf))
 		}
@@ -149,7 +170,7 @@ func detect(buf []byte) {
 			} else if buf[2] == 0x05 {
 				logger.Info("Ack client battle loaded")
 
-				successChan <- 1
+				gameLoadSuccessChan <- 1
 			}
 			if len(buf) != 3 {
 				logger.Error("GAME_LOADED_ACK package length is not 3? ", len(buf))
@@ -171,7 +192,19 @@ func detect(buf []byte) {
 			if len(buf) == 59 {
 
 			} else if len(buf) == 99 {
-				startChan <- 1
+
+				copy(hostInfo[:], buf[2:47])
+				copy(clientInfo[:], buf[47:92])
+				stageId = buf[92]
+				musicId = buf[93]
+				copy(randomSeeds[:], buf[94:98])
+				matchId = buf[98]
+				replayData[matchId] = make([]uint16, 1) // 填充一个 garbage
+				replayEnd[matchId] = false
+
+				repReqStatus = 0x00
+
+				// startChan <- 1
 			} else {
 				logger.Info("GAME_MATCH package length is not 59/99? ", len(buf))
 			}
@@ -186,7 +219,11 @@ func detect(buf []byte) {
 				logger.Error("GAME_MATCH_REQUEST package length is not 2? ", len(buf))
 			}
 
-			//   127.0.0.1-34756-watch.pcapng line 9431 不知道为啥抓包 0x0e 0x0b 包出现在 0x0d 0x09 包后面
+			//   在观战的一开始 观战方首先发送 0x0e, 0x0b, 0xff, 0xff, 0xff, 0xff, 0x00
+			//   此时 客户端 必定返回 GAME_MATCH
+			//   故私以为 frame id 应该是 有符号整数 而不是 doc 所说 无符号整数
+
+			//   127.0.0.1-34756-watch.pcapng line 9431
 			//   0x0e ,0x0b ,0xd0 ,0x25 ,0x00 ,0x00 ,0x06 [frame id 208 37 0 0] [match id 0x06]
 			//   0x0d ,0x09 ,0x18 ,0x78 ,0x9c ,0xbb ,0xa0 ,0xca ,0x00 ,0x06 ,0x6c ,0x5c ,0x1c ,0x0c ,0x30 ,0xa8 ,0x01 ,0xc6 ,0x0c ,0x0c ,0x9a ,0x0c ,0x00 ,0x23 ,0x97 ,0x01 ,0xaf
 			//   decompress [208 37 0 0 0 0 0 0 6 10 8 0 8 0 8 0 8 0 8 0 40 0 8 0 40 0 0 0 41 0]
@@ -197,9 +234,6 @@ func detect(buf []byte) {
 			//   decompress [216 37 0 0 0 0 0 0 6 8 8 0 42 0 8 0 8 0 8 0 8 0 8 0 8 0]
 
 			//   frame_id [216 37 0 0] end_frame_id [0 0 0 0] match_id [6] game_inputs_count [8] replay_inputs [8 0] [42 0] [8 0] [8 0] [8 0] [8 0] [8 0] [8 0]
-			//   >> quote touhou-protocol-docs here （问就是没看懂）
-			//   >> replay_inputs is a list of the last replay_inputs_count inputs of both players, stored in descending frame order.
-			//   >> The first replay_input is the input at frame frame_id, the next one is the input at frame frame_id - 1, and so on.
 
 			//   10800与52513对战，51390从1487开始观战.pcapng line 1720
 			//   0x0e ,0x0b ,0xe0 ,0x01 ,0x00 ,0x00 ,0x01   frame id [ 000001e0 ]
@@ -209,11 +243,11 @@ func detect(buf []byte) {
 
 			//   10800与54015对战，39965从2171开始观战.pcapng line 4687   不知道为啥抓包 0x0e 0x0b 包出现在 0x0d 0x09 包后面， wireshark 里包时间的顺序并不是实际的主机发送的顺序
 			//    frame id [ 00000bde ]
-			//   0e 0b d6 0b 00 00 01       这里因为包顺序不对，忽略就好了，实际对应应该是 0e 0b de 0b 00 00 01
+			//   0e 0b d6 0b 00 00 01       观战方已经收到的 frame id
 			//   0x0d ,0x09 ,0x13 ,0x78 ,0x9c ,0xbb ,0xc7 ,0xcd ,0x00 ,0x06 ,0x8c ,0x1c ,0x0c ,0x28 ,0x80 ,0x85 ,0x01 ,0x00 ,0x18 ,0x5b ,0x00 ,0xf7
 			//   [222 11 0 0 0 0 0 0 1 8 0 0 0 0 0 0 0 0 0 0 0 0 0 0 4 0]
-			//    de  b
-			//    bde>>1==5ef            |  5ef  |  5f0  |  5f1  |  5f2  |  // 不知道 frame id 对不对但是不重要了 client input + host input 一组 4 bytes
+			//    de  b                 |bde bdd|bdc bdb|bda bd9|bd8 bd7|  // client 发送新的 frame
+			//    bde>>1==5ef           |  5ef  |  5f0  |  5f1  |  5f2  |  // client input + host input 一组 4 bytes
 			//                                             line 4522
 			//   0d 03 ef 05 00 00 05 02 00 00 00 00
 			//   0e 03 ef 05 00 00 05 01 00 00
@@ -262,10 +296,8 @@ func detect(buf []byte) {
 			//   [246 11 0 0 0 0 0 0 1 8 0 0 132 0 0 0 132 0 0 0 132 0 0 0 4 0]  11,246->bf6 bf6>>1==5fb 132->0x84
 
 			//  replay 发送的是机体的状态而不是玩家的操作
-			//  replay 中的 frame id 是这个操作在 0e03/0d03 中 frame id << 1
-			//  >> quote touhou-protocol-docs here （说法略有不同）
-			//  >> replay_input is a pair of a client_input and a host_input, always sent in pairs and in that order.
-			//  >> There are game_inputs_count game_input, which means that there are actually replay_inputs_count = game_inputs_count / 2 pairs of host and client inputs.
+			//  猜测 replay 中的 frame id 是这个操作在 0e03/0d03 中 frame id << 1
+			//  由于暂时无法精确了解玩家操作如何影响机体状态 暂时无法验证
 
 			/*	b := bytes.NewBuffer([]byte{0x78, 0x9c, 0xbb, 0xa1, 0xca, 0x00, 0x06, 0x6c, 0x1c, 0x1c, 0x0c, 0x5a, 0x0c, 0x1c, 0x48, 0x10, 0x00, 0x1e, 0xb7, 0x01, 0x6e})
 				r, err := zlib.NewReader(b)
@@ -278,9 +310,71 @@ func detect(buf []byte) {
 					fmt.Println(err == io.EOF, err, ans[:n])
 				}*/
 		case GAME_REPLAY:
+			// 0x0d ,0x09 ,0x11 ,0x78 ,0x9c ,0x7b ,0xc6 ,0xcd ,0x00 ,0x06 ,0x8c ,0x1c ,0x0c ,0x68 ,0x00 ,0x00 ,0x19 ,0x23 ,0x00 ,0xfb
+			if len(buf) > 3 && len(buf)-3 == int(buf[2]) {
+				r, err := zlib.NewReader(bytes.NewBuffer(buf[3:]))
+				if err != nil {
+					logger.WithError(err).Error("New zlib reader error")
+				} else {
+					ans := make([]byte, 2048)
+					n, err := r.Read(ans)
+					_ = r.Close()
+					if err == io.EOF {
+						// decode package
+						logger.Info("Replay data decompress ", ans[:n])
+
+						//   frame_id [216 37 0 0] end_frame_id [0 0 0 0] match_id [6] game_inputs_count [8] replay_inputs [8 0] [42 0] [8 0] [8 0] [8 0] [8 0] [8 0] [8 0]
+						if n >= 10 && n-10 == int(ans[9])*2 {
+							frameId := int(ans[0]) | int(ans[1])<<8 | int(ans[2])<<16 | int(ans[3])<<24
+							endFrameId := int(ans[4]) | int(ans[5])<<8 | int(ans[6])<<16 | int(ans[7])<<24
+
+							data := replayData[ans[8]]
+							getDataLen := len(data) - 1
+							if getDataLen == -1 {
+								logger.Error("No such match")
+							} else if frameId-getDataLen <= int(ans[9]) {
+								newDataLen := frameId - getDataLen
+
+								if newDataLen > 0 {
+									newData := make([]uint16, newDataLen)
+
+									for i := 0; i < newDataLen; i++ {
+										newData[newDataLen-1-i] = uint16(ans[10+i*2])<<8 | uint16(ans[11+i*2])
+									}
+
+									replayData[ans[8]] = append(data, newData...)
+
+									if len(replayData[ans[8]])-1 != frameId {
+										logger.Error("Replay data not match after append new data")
+									}
+								}
+
+								if endFrameId != 0 {
+									logger.Info("Frame id ", frameId, " end frame id ", endFrameId)
+
+									if endFrameId == frameId {
+										logger.Info("Match end")
+										replayEnd[ans[8]] = true
+									}
+								}
+
+								repReqStatus = 0x00
+							} else {
+								logger.Warn("Replay data package drop: frame id ", frameId, " length ", ans[9])
+							}
+						} else {
+							logger.Error("Replay data content invalid")
+						}
+					} else {
+						logger.WithError(err).Error("Zlib decode error")
+					}
+					// fmt.Println(err == io.EOF, err, ans[:n])
+				}
+			} else {
+				logger.Error("Replay data invalid")
+			}
 
 		case GAME_REPLAY_REQUEST:
-
 		}
 	case SOKUROLL_TIME:
 		logger.Info("SOKUROLL_TIME")
@@ -353,31 +447,60 @@ func Sync(master, slave *net.UDPConn) {
 	go func() {
 		defer wg.Done()
 
-		logger.Warn("Wait for spectacle init")
-		<-successChan
+		logger.Warn("Wait for host and client init")
+		<-gameLoadSuccessChan
 
-		logger.Warn("Send spectacle init")
-		slave.WriteToUDP([]byte{5, 110, 115, 101, 217, 255, 196, 110, 72, 141, 124, 161, 146, 49, 52, 114, 149, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, slaveAddr)
+		requestData := append([]byte{byte(INIT_REQUEST)}, gameId[:]...) // INIT_REQUEST and game id
+		requestData = append(requestData, make([]byte, 8)...)           // garbage
+		requestData = append(requestData, 0x00)                         // spectacle request
+		requestData = append(requestData, 0x00)                         //  data length 0
+		requestData = append(requestData, make([]byte, 38)...)          // make it 65 bytes long
 
-		<-spectacleChan
+		logger.Warn("Send spectacle init ", requestData)
+		slave.WriteToUDP(requestData, slaveAddr)
+
+		matchId = 0x00
+		<-spectacleAcceptChan
 		// slave.WriteToUDP([]byte{0x04, 0x04, 0x00, 0x00, 0x00}, slaveAddr)
-		logger.Warn("Get match info")
-		slave.WriteToUDP([]byte{0x0e, 0x0b, 0xff, 0xff, 0xff, 0xff, 0x00}, slaveAddr)
+		// logger.Warn("Get match info")
+		// slave.WriteToUDP([]byte{CLIENT_GAME, GAME_REPLAY_REQUEST, 0xff, 0xff, 0xff, 0xff, 0x00}, slaveAddr) // client will return GAME_MATCH package
 
-		<-startChan
-		logger.Warn("Get some replay package")
-		for i := 0; i < 15*5; i += 1 {
-			// 如果不存在的时刻 得到的会是空
-			// 0e 0b 34 05 00 00 01
-			// [13, 9 ,15, 120, 156, 99 ,224 ,231 ,103, 0 ,1 ,70, 6 ,0 ,1 ,11, 0, 32]  [0 15 15 0 0 0 0 0 1 0]
-			// [13, 9 ,15, 120, 156, 19, 224, 231, 103, 0 ,1 ,70, 6 ,0 ,1 ,171, 0, 48] [16 15 15 0 0 0 0 0 1 0]
-			// 注意前 1s 是没有数据的 毕竟在放第一战动画
-			// 抓包计算
-			// 对于 frame id 60f/s
-			// 对于 replay frame id 120f/s
-			// 对于 0x0e, 0x0b 15f/s
-			slave.WriteToUDP([]byte{0x0e, 0x0b, 0x00, 0x0, 0x0, 0x00, 0x01}, slaveAddr)
-			time.Sleep(time.Millisecond * 66)
+		for !quitFlag {
+			// <-startChan
+			logger.Warn("Get some replay package")
+			repReqStatus = 0x00
+			for !quitFlag {
+
+				// 如果不存在的时刻 得到的会是空
+				// 0e 0b 34 05 00 00 01
+				// [13, 9 ,15, 120, 156, 99 ,224 ,231 ,103, 0 ,1 ,70, 6 ,0 ,1 ,11, 0, 32]  [0 15 15 0 0 0 0 0 1 0]
+				// [13, 9 ,15, 120, 156, 19, 224, 231, 103, 0 ,1 ,70, 6 ,0 ,1 ,171, 0, 48] [16 15 15 0 0 0 0 0 1 0]
+				// 注意前 1s 是没有数据的 毕竟在放第一战动画
+				// 抓包计算
+				// 对于 frame id 60f/s
+				// 对于 replay frame id 120f/s
+				// 对于 0x0e, 0x0b 15f/s
+				switch repReqStatus {
+				case 0x00, 0x03:
+					getId := len(replayData[matchId]) - 1 // at start, match id == 0 , get id == -1
+					logger.Info("Send replay request ", getId, " ", matchId)
+					slave.WriteToUDP([]byte{CLIENT_GAME, GAME_REPLAY_REQUEST, byte(getId), byte(getId >> 8), byte(getId >> 16), byte(getId >> 24), matchId}, slaveAddr)
+					repReqStatus = 0x01
+				case 0x01, 0x02:
+					repReqStatus++
+				}
+
+				time.Sleep(time.Millisecond * 66)
+
+				if replayEnd[matchId] {
+					break
+				}
+			}
+
+			if !quitFlag {
+				logger.Info("Waiting for another match")
+				<-gameLoadSuccessChan
+			}
 		}
 
 	}()
